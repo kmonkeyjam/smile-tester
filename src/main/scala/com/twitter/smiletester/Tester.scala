@@ -1,13 +1,16 @@
 package com.twitter.smiletester
 
 import net.lag.configgy.{ConfigMap, Configgy}
-import net.lag.smile.{MemcacheClient, MemcacheServerTimeout}
 import java.util.{Date, Timer, TimerTask}
 import java.util.concurrent.CountDownLatch
+import java.lang.Integer
 import collection.jcl.ArrayList
+import collection.mutable.ListBuffer
+import net.lag.smile._
+import com.meetup.memcached.{SockIOPool, MemcachedClient}
 
 class MemcacheTask(
-    client: MemcacheClient[String],
+    client: MemcachePool,
     memcacheConfig: ConfigMap,
     timer: Timer,
     numKeys: Int,
@@ -27,7 +30,7 @@ class MemcacheTask(
       val elapsed = System.currentTimeMillis - start
       resp match {
         case Some(value) => {
-          if (value == key) {
+          if (new String(value) == key) {
             // println(elapsed)
             totalSuccessfulRuns += 1
             totalElapsedSuccessfulRunTime += elapsed
@@ -52,6 +55,8 @@ class MemcacheTask(
 }
 
 object Tester {
+  val memcacheHosts = new ListBuffer[String]
+
   def main(args: Array[String]) {
     Configgy.configure("config/test.conf")
 
@@ -62,25 +67,25 @@ object Tester {
     val numRunsPerConn = config.getInt("num_runs_per_conn", 10)
     val numConnectionPools = config.getInt("num_pools", 1)
     val maxConnectionsToMemcache = config.getInt("max_conn", 900)
+    val numConnInPool = config.getInt("num_smile_pools", 350)
 
+    parseArgs(args.toList)
     
     val memcacheConfig = Configgy.config.configMap("memcache")
     memcacheConfig.setInt("num_connection_in_pool", Math.min(numConns / numConnectionPools, maxConnectionsToMemcache))
 
-//    val numConnInPool = memcacheConfig.getInt("num_connection_in_pool", 1)
-//    val client = new ClientPool(numConnInPool, memcacheConfig)
+    if (!memcacheHosts.isEmpty) {
+      memcacheConfig.setList("servers", memcacheHosts.toList)
+    }
 
-    val clientPool = new ArrayList[MemcacheClient[String]]
 
-    val client = MemcacheClient.create(memcacheConfig)
+    MemcachePool(memcacheConfig)
+
+    val client = new MemcachePool(numConnInPool, memcacheConfig)
+
     for (i <- 1 to numKeys) {
       val key = "TEST" + i
-      client.set(key, key)
-    }
-    clientPool += client
-
-    for (i <- 1 to numConnectionPools - 1) {
-      clientPool += MemcacheClient.create(memcacheConfig)
+      client.set(key, key.getBytes, 0, 7200)
     }
 
     val latch = new CountDownLatch(numConns)
@@ -91,7 +96,7 @@ object Tester {
     val startTime = new Date(start)
     for (i <- 1 to numConns) {
       val timer = new Timer(true)
-      val task = new MemcacheTask(clientPool(i % numConnectionPools), memcacheConfig, timer, numKeys, numRunsPerConn, latch)
+      val task = new MemcacheTask(client, memcacheConfig, timer, numKeys, numRunsPerConn, latch)
       timer.scheduleAtFixedRate(task, startTime, delay)
       tasks += task
     }
@@ -113,12 +118,23 @@ object Tester {
 
     val totalReq = (totalSuccess + totalUnsuccess).toLong
     val elapsedTime = (finish - start) / 1000
-    println("Delay: " + delay + "ms Num conn: " + numConns + " Num Pools: " + numConnectionPools, " Num memcache conn per client: " + memcacheConfig.getInt("num_connection_in_pool").get)
+    println(config)
+    println(memcacheConfig)
     println("Total successful: " + totalSuccess + " total unsuccessful: " + totalUnsuccess)
     println("Total elapsed time: " + (finish - start))
     if (totalSuccess > 0) println("Avg memcache read time for success: " + totalSuccessTime / totalSuccess)
     if (totalUnsuccess > 0) println("Avg memcache read time for failures: " + totalUnsuccessTime / totalUnsuccess)
     println(totalReq / elapsedTime  + " req/sec")
-   }
-}
+  }
 
+  def parseArgs(args: List[String]): Unit = {
+    args match {
+      case "-m" :: host :: xs => {
+        memcacheHosts += host
+        parseArgs(xs)
+      }
+      case Nil => // skip
+      case unknown :: _ => 
+    }
+  }
+}
