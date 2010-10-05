@@ -79,7 +79,7 @@ class PoolWrapper(maxActive: Int, config: ConfigMap) extends Object with Memcach
     execute { _.delete(key) }
   }
 
-  def execute[T](f: MemcacheClient[Array[Byte]] => T): T = {
+  def execute[T](f: MemcacheClient[Array[Byte]] => T): T = Stats.time("SmilePool.Execute") {
     val memcache = pool.borrowObject().asInstanceOf[MemcacheClient[Array[Byte]]]
     val result = f(memcache)
     pool.returnObject(memcache)

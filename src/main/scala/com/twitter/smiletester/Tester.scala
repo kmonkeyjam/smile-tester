@@ -1,6 +1,5 @@
 package com.twitter.smiletester
 
-import net.lag.configgy.{ConfigMap, Configgy}
 import java.util.{Date, Timer, TimerTask}
 import java.util.concurrent.CountDownLatch
 import java.lang.Integer
@@ -8,6 +7,8 @@ import collection.jcl.ArrayList
 import collection.mutable.ListBuffer
 import net.lag.smile._
 import com.meetup.memcached.{SockIOPool, MemcachedClient}
+import net.lag.configgy.{RuntimeEnvironment, ConfigMap, Configgy}
+import com.twitter.ostrich.{Service, ServiceTracker}
 
 class MemcacheTask(
     client: MemcachePool,
@@ -54,10 +55,14 @@ class MemcacheTask(
   }
 }
 
-object Tester {
+object Tester extends Service {
   val memcacheHosts = new ListBuffer[String]
 
   def main(args: Array[String]) {
+    val runtime = new RuntimeEnvironment(getClass)
+    runtime.configFilename = "config/test.conf"
+    runtime.load(args)
+
     Configgy.configure("config/test.conf")
 
     val config = Configgy.config.configMap("loadtest")
@@ -125,8 +130,19 @@ object Tester {
     if (totalSuccess > 0) println("Avg memcache read time for success: " + totalSuccessTime / totalSuccess)
     if (totalUnsuccess > 0) println("Avg memcache read time for failures: " + totalUnsuccessTime / totalUnsuccess)
     println(totalReq / elapsedTime  + " req/sec")
+
+    ServiceTracker.register(this)
+    ServiceTracker.startAdmin(Configgy.config, runtime)    
   }
 
+  def quiesce() {
+    // what to do here? stop jetty?
+  }
+
+  def shutdown() {
+    // what to do here? stop jetty?
+  }
+  
   def parseArgs(args: List[String]): Unit = {
     args match {
       case "-m" :: host :: xs => {
