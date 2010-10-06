@@ -3,16 +3,16 @@ package com.twitter.smiletester
 import java.util.{Date, Timer, TimerTask}
 import java.util.concurrent.CountDownLatch
 import java.lang.Integer
+import java.sql.ResultSet
 import collection.jcl.ArrayList
 import collection.mutable.ListBuffer
-import net.lag.smile._
-import com.meetup.memcached.{SockIOPool, MemcachedClient}
 import net.lag.configgy.{RuntimeEnvironment, ConfigMap, Configgy}
 import com.twitter.ostrich.{Service, ServiceTracker}
+import net.lag.logging.Logger
+import com.twitter.service.passbird.loadbalancer.QueryEvaluatorLoadBalancer
 
-class MemcacheTask(
-    client: MemcachePool,
-    memcacheConfig: ConfigMap,
+class LoadtestTask(
+    queryEvaluator: QueryEvaluatorLoadBalancer,
     timer: Timer,
     numKeys: Int,
     numRuns: Int,
@@ -22,26 +22,18 @@ class MemcacheTask(
   var totalUnsuccessfulRuns = 0
   var totalElapsedSuccessfulRunTime = 0L
   var totalElapsedUnsuccessfulRunTime = 0L
+  val query = "SELECT user_id, token, secret, client_application_id, invalidated_at, hashed_password FROM oauth_access_tokens LEFT JOIN users ON users.id = oauth_access_tokens.user_id WHERE token = ? AND (invalidated_at IS NULL OR invalidated_at > NOW())"
 
   override def run() {
     try {
-      val key = "TEST" + (random.nextInt(numKeys) + 1)
+      val token = "19-6OWobOFlEurdOiNBpxucg8M8sRVL01ilReGC2ZjE"
       val start = System.currentTimeMillis
-      val resp = client.get(key)
+      val key = ""
+      val resp = Some("")
+      val results = queryEvaluator.select(query, token)((row: ResultSet) => row.getString("secret"))
       val elapsed = System.currentTimeMillis - start
-      resp match {
-        case Some(value) => {
-          if (new String(value) == key) {
-            // println(elapsed)
-            totalSuccessfulRuns += 1
-            totalElapsedSuccessfulRunTime += elapsed
-          } else {
-            totalUnsuccessfulRuns += 1
-            totalElapsedUnsuccessfulRunTime += elapsed
-          }
-        }
-        case None => totalUnsuccessfulRuns += 1
-      }
+      totalSuccessfulRuns += 1
+      totalElapsedSuccessfulRunTime += elapsed
     } catch {
       case e => totalUnsuccessfulRuns += 1
     } finally {
@@ -56,8 +48,6 @@ class MemcacheTask(
 }
 
 object Tester extends Service {
-  val memcacheHosts = new ListBuffer[String]
-
   def main(args: Array[String]) {
     val runtime = new RuntimeEnvironment(getClass)
     runtime.configFilename = "config/test.conf"
@@ -70,38 +60,19 @@ object Tester extends Service {
     val numKeys = config.getInt("num_keys", 10)
     val numConns = config.getInt("num_conn", 10)
     val numRunsPerConn = config.getInt("num_runs_per_conn", 10)
-    val numConnectionPools = config.getInt("num_pools", 1)
-    val maxConnectionsToMemcache = config.getInt("max_conn", 900)
-    val numConnInPool = config.getInt("num_smile_pools", 350)
 
     parseArgs(args.toList)
-    
-    val memcacheConfig = Configgy.config.configMap("memcache")
-    memcacheConfig.setInt("num_connection_in_pool", Math.min(numConns / numConnectionPools, maxConnectionsToMemcache))
 
-    if (!memcacheHosts.isEmpty) {
-      memcacheConfig.setList("servers", memcacheHosts.toList)
-    }
-
-
-    MemcachePool(memcacheConfig)
-
-    val client = new MemcachePool(numConnInPool, memcacheConfig)
-
-    for (i <- 1 to numKeys) {
-      val key = "TEST" + i
-      client.set(key, key.getBytes, 0, 7200)
-    }
+    val queryEvaluator = QueryEvaluatorLoadBalancer(
+      config, Logger.get("QueryEvaluatorLoadBalancer"), Logger.get("QueryEvaluator"))
 
     val latch = new CountDownLatch(numConns)
-
-    val tasks = new ArrayList[MemcacheTask]
-
+    val tasks = new ArrayList[LoadtestTask]
     val start = System.currentTimeMillis + 3000
     val startTime = new Date(start)
     for (i <- 1 to numConns) {
       val timer = new Timer(true)
-      val task = new MemcacheTask(client, memcacheConfig, timer, numKeys, numRunsPerConn, latch)
+      val task = new LoadtestTask(queryEvaluator, timer, numKeys, numRunsPerConn, latch)
       timer.scheduleAtFixedRate(task, startTime, delay)
       tasks += task
     }
@@ -124,12 +95,11 @@ object Tester extends Service {
     val totalReq = (totalSuccess + totalUnsuccess).toLong
     val elapsedTime = (finish - start) / 1000
     println(config)
-    println(memcacheConfig)
     println("Total successful: " + totalSuccess + " total unsuccessful: " + totalUnsuccess)
     println("Total elapsed time: " + (finish - start))
-    if (totalSuccess > 0) println("Avg memcache read time for success: " + totalSuccessTime / totalSuccess)
-    if (totalUnsuccess > 0) println("Avg memcache read time for failures: " + totalUnsuccessTime / totalUnsuccess)
-    println(totalReq / elapsedTime  + " req/sec")
+    if (totalSuccess > 0) println("Avg read time for success: " + totalSuccessTime / totalSuccess)
+    if (totalUnsuccess > 0) println("Avg read time for failures: " + totalUnsuccessTime / totalUnsuccess)
+    if (elapsedTime > 0) println(totalReq / elapsedTime  + " req/sec")
 
     ServiceTracker.register(this)
     ServiceTracker.startAdmin(Configgy.config, runtime)    
@@ -146,7 +116,6 @@ object Tester extends Service {
   def parseArgs(args: List[String]): Unit = {
     args match {
       case "-m" :: host :: xs => {
-        memcacheHosts += host
         parseArgs(xs)
       }
       case Nil => // skip
